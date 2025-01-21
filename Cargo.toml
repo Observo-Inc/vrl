@@ -22,7 +22,7 @@ members = [
 
 
 [features]
-default = ["compiler", "value", "diagnostic", "path", "parser", "stdlib", "datadog", "core"]
+default = ["compiler", "value", "diagnostic", "path", "parser", "stdlib", "datadog", "core", "observo"]
 
 # Main features (on by default)
 compiler = ["diagnostic", "path", "parser", "value", "dep:paste", "dep:chrono", "dep:serde", "dep:regex", "dep:bytes", "dep:ordered-float", "dep:chrono-tz", "dep:snafu", "dep:thiserror", "dep:dyn-clone", "dep:indoc", "dep:thiserror", "dep:lalrpop-util"]
@@ -33,6 +33,7 @@ parser = ["path", "diagnostic", "value", "dep:thiserror", "dep:ordered-float", "
 parsing = ["value", "compiler", "dep:url", "dep:nom", "dep:regex", "dep:roxmltree", "dep:rust_decimal"]
 core = ["value", "dep:snafu", "dep:nom"]
 string_path = []
+observo = ["dep:metrics", "dep:metrics-util"]
 
 # Datadog related features (on by default)
 datadog = ["datadog_filter", "datadog_grok", "datadog_search"]
@@ -160,6 +161,8 @@ nom = { version = "7", default-features = false, features = ["std"], optional = 
 once_cell = { version = "1", default-features = false, features = ["std"], optional = true }
 ordered-float = { version = "4", default-features = false, optional = true }
 md-5 = { version = "0.10", optional = true }
+metrics = { version = "0.24.0", optional = true }
+metrics-util = { version = "0.19.0", optional = true }
 paste = { version = "1", default-features = false, optional = true }
 parse-size = { version = "1.1.0",  optional = true }
 peeking_take_while = { version = "1", default-features = false, optional = true }
@@ -219,6 +222,8 @@ ofb = { version = "0.6", optional = true }
 # Protobuf support.
 prost = { version = "0.13", default-features = false, optional = true, features = ["std"] }
 prost-reflect = { version = "0.14", default-features = false, optional = true }
+
+quick-csv = "0.1.6"
 
 # Dependencies used for non-WASM
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

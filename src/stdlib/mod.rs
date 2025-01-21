@@ -65,6 +65,7 @@ cfg_if::cfg_if! {
         mod del;
         mod dns_lookup;
         mod downcase;
+        mod emit_metric;
         mod encode_base16;
         mod encode_base64;
         mod encode_charset;
@@ -248,6 +249,8 @@ cfg_if::cfg_if! {
         pub use del::Del;
         pub use dns_lookup::DnsLookup;
         pub use downcase::Downcase;
+        pub use emit_metric::EmitMetric;
+
         pub use casing::camelcase::Camelcase;
         pub use casing::pascalcase::Pascalcase;
         pub use casing::snakecase::Snakecase;

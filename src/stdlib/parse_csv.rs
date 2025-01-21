@@ -1,5 +1,6 @@
 use crate::compiler::prelude::*;
-use csv::ReaderBuilder;
+use quick_csv::Csv;
+use std::io::Cursor;
 
 fn parse_csv(csv_string: Value, delimiter: Value) -> Resolved {
     let csv_string = csv_string.try_bytes()?;
@@ -8,26 +9,28 @@ fn parse_csv(csv_string: Value, delimiter: Value) -> Resolved {
         return Err("delimiter must be a single character".into());
     }
     let delimiter = delimiter[0];
-    let reader = ReaderBuilder::new()
-        .has_headers(false)
-        .delimiter(delimiter)
-        .from_reader(&*csv_string);
-    reader
-        .into_byte_records()
+
+    let csv = Csv::from_reader(Cursor::new(&*csv_string))
+        .delimiter(delimiter);
+
+    let result = csv.into_iter()
         .next()
         .transpose()
-        .map_err(|err| format!("invalid csv record: {err}").into()) // shouldn't really happen
+        .map_err(|err| format!("invalid csv record: {err}").into())
         .map(|record| {
             record
                 .map(|record| {
+                    // Use byte_columns() to get an iterator over byte slices
                     record
-                        .iter()
+                        .bytes_columns()
                         .map(|x| Bytes::copy_from_slice(x).into())
                         .collect::<Vec<Value>>()
                 })
                 .unwrap_or_default()
                 .into()
-        })
+        });
+
+    result
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -148,5 +151,145 @@ mod tests {
             want: Ok(value!(["first", "line"])),
             tdef: TypeDef::array(inner_kind()).fallible(),
         }
+
+        quoted_fields_with_commas {
+           args: func_args![value: value!("\"field,with,commas\",normal,\"another,quoted\"")],
+           want: Ok(value!(["field,with,commas", "normal", "another,quoted"])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       quoted_fields_with_quotes {
+           args: func_args![value: value!("\"field with \"\"quotes\"\"\",normal")],
+           want: Ok(value!(["field with \"quotes\"", "normal"])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       mixed_quoted_unquoted {
+           args: func_args![value: value!("unquoted,\"quoted field\",another_unquoted")],
+           want: Ok(value!(["unquoted", "quoted field", "another_unquoted"])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       empty_fields {
+           args: func_args![value: value!("field1,,field3,")],
+           want: Ok(value!(["field1", "", "field3", ""])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       quoted_empty_fields {
+           args: func_args![value: value!("field1,\"\",field3")],
+           want: Ok(value!(["field1", "", "field3"])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       whitespace_handling {
+           args: func_args![value: value!(" field1 , field2 ,field3 ")],
+           want: Ok(value!([" field1 ", " field2 ", "field3 "])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       quoted_whitespace {
+           args: func_args![value: value!("\" field1 \",\"field2\",\" field3 \"")],
+           want: Ok(value!([" field1 ", "field2", " field3 "])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       newlines_in_quoted_fields {
+           args: func_args![value: value!("\"field\nwith\nnewlines\",normal")],
+           want: Ok(value!(["field\nwith\nnewlines", "normal"])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       tab_delimiter {
+           args: func_args![value: value!("field1\tfield2\tfield3"), delimiter: value!("\t")],
+           want: Ok(value!(["field1", "field2", "field3"])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       pipe_delimiter {
+           args: func_args![value: value!("field1|field2|field3"), delimiter: value!("|")],
+           want: Ok(value!(["field1", "field2", "field3"])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       semicolon_delimiter {
+           args: func_args![value: value!("field1;field2;field3"), delimiter: value!(";")],
+           want: Ok(value!(["field1", "field2", "field3"])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       single_quote_field {
+           args: func_args![value: value!("field1,'field2',field3")],
+           want: Ok(value!(["field1", "'field2'", "field3"])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       numeric_looking_fields {
+           args: func_args![value: value!("123,45.67,\"789\",0")],
+           want: Ok(value!(["123", "45.67", "789", "0"])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       boolean_looking_fields {
+           args: func_args![value: value!("true,false,TRUE,FALSE")],
+           want: Ok(value!(["true", "false", "TRUE", "FALSE"])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       special_characters {
+           args: func_args![value: value!("field@#$%,\"field^&*()\",field!~`")],
+           want: Ok(value!(["field@#$%", "field^&*()", "field!~`"])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       unicode_characters {
+           args: func_args![value: value!("café,naïve,\"résumé\",München")],
+           want: Ok(value!(["café", "naïve", "résumé", "München"])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+
+       malformed_quotes_unclosed {
+           args: func_args![value: value!("field1,\"unclosed quote,field3")],
+           want: Ok(value!(["field1", "unclosed quote,field"])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       malformed_quotes_embedded {
+           args: func_args![value: value!("field1,fie\"ld2,field3")],
+           want: Err("invalid csv record: A CSV column has a quote but the entire column value is not quoted"),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       empty_delimiter {
+           args: func_args![value: value!("foo,bar"), delimiter: value!("")],
+           want: Err("delimiter must be a single character"),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       multi_byte_delimiter_attempt {
+           args: func_args![value: value!("foo,bar"), delimiter: value!("🎵")],
+           want: Err("delimiter must be a single character"),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       carriage_return_handling {
+           args: func_args![value: value!("field1,field2\r\nfield3,field4")],
+           want: Ok(value!(["field1", "field2"])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       only_commas {
+           args: func_args![value: value!(",,,")],
+           want: Ok(value!(["", "", "", ""])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
+       only_quotes {
+           args: func_args![value: value!("\"\"")],
+           want: Ok(value!([""])),
+           tdef: TypeDef::array(inner_kind()).fallible(),
+       }
+
     ];
 }
