@@ -68,7 +68,10 @@ impl Function for MatchAny {
             re_strings.push(re.to_string());
         }
 
-        let regex_set = RegexSet::new(re_strings).expect("regex were already valid");
+        let regex_set = RegexSet::new(re_strings).map_err(|e| {
+            Box::new(ExpressionError::from(format!("could not compile regex set: {e}")))
+                as Box<dyn DiagnosticMessage>
+        })?;
 
         Ok(MatchAnyFn { value, regex_set }.as_expr())
     }
