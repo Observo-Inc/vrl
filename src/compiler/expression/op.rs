@@ -278,11 +278,19 @@ impl Expression for Op {
                     }
 
                     // "bar" * 1
+                    //
+                    // Deliberately stays infallible (OBE-10736). `try_mul` enforces a
+                    // MAX_REPEAT_BYTES cap and returns an error above it, but marking this
+                    // op fallible would be a breaking language change: every existing
+                    // program doing `"x" * n` would stop compiling with E100. Integer
+                    // `Add`/`Sub`/`Mul` make the same trade-off by wrapping rather than
+                    // erroring. The over-limit error still surfaces as a graceful runtime
+                    // error rather than an OOM, which is what the ticket required.
                     Mul if lhs_def.is_bytes() && rhs_def.is_integer() => {
                         lhs_def.union(rhs_def).with_kind(K::bytes())
                     }
 
-                    // 1 * "bar"
+                    // 1 * "bar"  — see note above.
                     Mul if lhs_def.is_integer() && rhs_def.is_bytes() => {
                         lhs_def.union(rhs_def).with_kind(K::bytes())
                     }

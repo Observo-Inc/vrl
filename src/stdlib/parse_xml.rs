@@ -481,6 +481,31 @@ mod tests {
         }
     ];
 
+    // OBE-10742: deeply-nested XML must return an error, not overflow the stack.
+    #[test]
+    fn deeply_nested_xml_returns_error() {
+        // Build <a><a><a>...</a></a></a> with 200 levels — exceeds MAX_XML_DEPTH (128).
+        let open: String = "<a>".repeat(200);
+        let close: String = "</a>".repeat(200);
+        let xml = format!("{}{}", open, close);
+        let result = parse_xml(
+            Value::Bytes(xml.into()),
+            ParseOptions {
+                trim: None,
+                include_attr: None,
+                attr_prefix: None,
+                text_key: None,
+                always_use_text_key: None,
+                parse_bool: None,
+                parse_null: None,
+                parse_number: None,
+            },
+        );
+        assert!(result.is_err(), "expected error for XML exceeding depth limit");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("nesting limit"), "error should mention nesting limit; got: {msg}");
+    }
+
     #[test]
     fn test_kind() {
         let state = state::TypeState::default();

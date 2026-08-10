@@ -1,5 +1,8 @@
 use crate::compiler::prelude::*;
 use once_cell::sync::Lazy;
+
+// OBE-10742: bound recursion depth to prevent stack overflow on deeply-nested XML.
+const MAX_XML_DEPTH: u32 = 128;
 use regex::{Regex, RegexBuilder};
 use roxmltree::{Document, Node, NodeType};
 use rust_decimal::prelude::Zero;
@@ -91,14 +94,17 @@ pub(crate) fn parse_xml(value: Value, options: ParseOptions) -> Resolved {
     // Trim whitespace around XML elements, if applicable.
     let parse = if trim { trim_xml(&string) } else { string };
     let doc = Document::parse(&parse).map_err(|e| format!("unable to parse xml: {e}"))?;
-    let value = process_node(doc.root(), &config);
-    Ok(value)
+    process_node(doc.root(), &config, 0)
 }
 
 /// Process an XML node, and return a VRL `Value`.
-fn process_node(node: Node, config: &ParseXmlConfig) -> Value {
+fn process_node(node: Node, config: &ParseXmlConfig, depth: u32) -> Resolved {
+    if depth > MAX_XML_DEPTH {
+        return Err(format!("xml nesting limit ({MAX_XML_DEPTH}) exceeded").into());
+    }
+
     // Helper to recurse over a `Node`s children, and build an object.
-    let recurse = |node: Node| -> ObjectMap {
+    let recurse = |node: Node| -> Result<ObjectMap, ExpressionError> {
         let mut map = BTreeMap::new();
 
         // Expand attributes, if required.
@@ -119,7 +125,7 @@ fn process_node(node: Node, config: &ParseXmlConfig) -> Value {
             };
 
             // Transform the node into a VRL `Value`.
-            let value = process_node(n, config);
+            let value = process_node(n, config, depth + 1)?;
 
             // If the key already exists, add it. Otherwise, insert.
             match map.entry(name) {
@@ -143,11 +149,11 @@ fn process_node(node: Node, config: &ParseXmlConfig) -> Value {
             }
         }
 
-        map
+        Ok(map)
     };
 
     match node.node_type() {
-        NodeType::Root => Value::Object(recurse(node)),
+        NodeType::Root => Ok(Value::Object(recurse(node)?)),
 
         NodeType::Element => {
             match (
@@ -155,9 +161,9 @@ fn process_node(node: Node, config: &ParseXmlConfig) -> Value {
                 node.attributes().len().is_zero(),
             ) {
                 // If the node has attributes, *always* recurse to expand default keys.
-                (_, false) if config.include_attr => Value::Object(recurse(node)),
+                (_, false) if config.include_attr => Ok(Value::Object(recurse(node)?)),
                 // If a text key should be used, always recurse.
-                (true, true) => Value::Object(recurse(node)),
+                (true, true) => Ok(Value::Object(recurse(node)?)),
                 // Otherwise, check the node count to determine what to do.
                 _ => match node.children().count() {
                     // For a single node, 'flatten' the object if necessary.
@@ -171,21 +177,21 @@ fn process_node(node: Node, config: &ParseXmlConfig) -> Value {
 
                             map.insert(
                                 node.tag_name().name().to_string().into(),
-                                process_node(node, config),
+                                process_node(node, config, depth + 1)?,
                             );
 
-                            Value::Object(map)
+                            Ok(Value::Object(map))
                         } else {
                             // Otherwise, 'flatten' the object by continuing processing.
-                            process_node(node, config)
+                            process_node(node, config, depth + 1)
                         }
                     }
                     // For 2+ nodes, expand.
-                    _ => Value::Object(recurse(node)),
+                    _ => Ok(Value::Object(recurse(node)?)),
                 },
             }
         }
-        NodeType::Text => process_text(node.text().expect("expected XML text node"), config),
+        NodeType::Text => Ok(process_text(node.text().expect("expected XML text node"), config)),
         _ => unreachable!("shouldn't be other XML nodes"),
     }
 }
