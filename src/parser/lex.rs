@@ -1327,7 +1327,14 @@ pub(crate) fn is_operator(ch: char) -> bool {
 fn unescape_string_literal(mut s: &str) -> String {
     let mut string = String::with_capacity(s.len());
     while let Some(i) = s.bytes().position(|b| b == b'\\') {
-        let next = s.as_bytes()[i + 1];
+        // The lexer never emits a literal ending in a lone backslash (it would
+        // have escaped the closing quote), so there is always an escape
+        // character here. Treat a trailing backslash as literal text rather
+        // than indexing out of bounds if that ever stops holding.
+        let Some(&next) = s.as_bytes().get(i + 1) else {
+            debug_assert!(false, "string literal ended with a lone backslash");
+            break;
+        };
         if next == b'\n' {
             // Remove the \n and any ensuing spaces or tabs
             string.push_str(&s[..i]);
@@ -1339,32 +1346,58 @@ fn unescape_string_literal(mut s: &str) -> String {
                 .sum();
             s = &s[i + whitespace + 2..];
         } else if next == b'u' {
-            // \u{HEX} — lexer validated syntax and codepoint; these unwraps cannot fail.
-            string.push_str(&s[..i]);
-            let rest = &s[i + 3..]; // skip past `\u{`
-            let close = rest.find('}').expect("closing } validated by lexer");
-            let hex = &rest[..close];
-            let codepoint = u32::from_str_radix(hex, 16).expect("hex validated by lexer");
-            let ch = char::from_u32(codepoint).expect("codepoint validated by lexer");
-            string.push(ch);
-            s = &rest[close + 1..];
+            // `\u{HEX}`: the lexer has already validated the syntax and that the
+            // codepoint is a legal `char`, so every step below is expected to
+            // succeed. It is nonetheless written to degrade gracefully rather
+            // than abort the process, because `template()` rewrites literal
+            // content before it reaches this function — the invariant spans two
+            // distant pieces of code, and a future edit there must not become a
+            // crash here.
+            let decoded = s.get(i + 3..).and_then(|rest| {
+                // skipped past `\u{`
+                let close = rest.find('}')?;
+                let codepoint = u32::from_str_radix(&rest[..close], 16).ok()?;
+                let ch = char::from_u32(codepoint)?;
+                Some((ch, &rest[close + 1..]))
+            });
+
+            if let Some((ch, remainder)) = decoded {
+                string.push_str(&s[..i]);
+                string.push(ch);
+                s = remainder;
+            } else {
+                debug_assert!(false, "lexer should have validated this \\u{{..}} escape");
+                // Keep the backslash as literal text and resume just after it,
+                // so the loop always makes progress.
+                string.push_str(&s[..=i]);
+                s = &s[i + 1..];
+            }
         } else {
-            let c = match next {
-                b'\'' => '\'',
-                b'"' => '"',
-                b'\\' => '\\',
-                b'n' => '\n',
-                b'r' => '\r',
-                b't' => '\t',
-                b'0' => '\0',
-                b'{' => '{',
-                b'}' => '}',
-                _ => unreachable!("lexer rejected this escape"),
+            let unescaped = match next {
+                b'\'' => Some('\''),
+                b'"' => Some('"'),
+                b'\\' => Some('\\'),
+                b'n' => Some('\n'),
+                b'r' => Some('\r'),
+                b't' => Some('\t'),
+                b'0' => Some('\0'),
+                b'{' => Some('{'),
+                b'}' => Some('}'),
+                _ => None,
             };
 
-            string.push_str(&s[..i]);
-            string.push(c);
-            s = &s[i + 2..];
+            if let Some(c) = unescaped {
+                string.push_str(&s[..i]);
+                string.push(c);
+                s = &s[i + 2..];
+            } else {
+                debug_assert!(false, "lexer should have rejected this escape");
+                // Unknown escape. Emit the backslash literally and resume after
+                // it rather than guessing at the intended character (`next` may
+                // be one byte of a multi-byte character).
+                string.push_str(&s[..=i]);
+                s = &s[i + 1..];
+            }
         }
     }
 
@@ -2287,6 +2320,38 @@ mod test {
             tokens.iter().any(|t| t.is_err()),
             "expected a lex error for missing open brace in unicode escape"
         );
+    }
+
+    // The other positive `\u{..}` tests construct a `StringLiteralToken` by hand,
+    // which skips the lexer. `unescape_string_literal` assumes the lexer already
+    // validated the escape, so lock in that the two really do agree by driving a
+    // literal through tokenization and *then* unescaping the resulting token.
+    #[test]
+    fn unicode_escape_tokenizes_and_unescapes_end_to_end() {
+        for (src, want) in [
+            (r#""\u{41}""#, "A"),
+            (r#""\u{1F600}""#, "\u{1F600}"),
+            (r#""a\u{20}b\u{9}c""#, "a b\tc"),
+            (r#""\u{10FFFF}""#, "\u{10FFFF}"), // highest legal codepoint
+            (r#""\u{000041}""#, "A"),          // leading zeros
+        ] {
+            let tokens: Vec<_> = Lexer::new(src).collect();
+            assert!(
+                tokens.iter().all(|t| t.is_ok()),
+                "{src} should tokenize cleanly, got {tokens:?}"
+            );
+
+            let literal = tokens
+                .into_iter()
+                .filter_map(|t| match t {
+                    Ok((_, Token::StringLiteral(literal), _)) => Some(literal),
+                    _ => None,
+                })
+                .next()
+                .unwrap_or_else(|| panic!("{src} should produce a string literal token"));
+
+            assert_eq!(literal.unescape(), want, "unescaping {src}");
+        }
     }
 
     #[test]
