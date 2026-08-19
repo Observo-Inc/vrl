@@ -276,15 +276,11 @@ mod tests {
             tdef: type_def(),
         }
 
+        // The sole real child is text ("text123"); the leading PI is not a
+        // real child, so this flattens the same as `<p>text123</p>` would.
         header_inside_element {
             args: func_args![ value: "<p><?xml?>text123</p>" ],
-            want: Ok(value!(
-                {
-                    "p": {
-                        "text": "text123"
-                    }
-                }
-            )),
+            want: Ok(value!({ "p": "text123" })),
             tdef: type_def(),
         }
 
@@ -498,6 +494,22 @@ mod tests {
         nested_comment_only_child {
             args: func_args![value: "<r><inner><!--boom--></inner></r>"],
             want: Ok(value!({ "r": { "inner": {} } })),
+            tdef: type_def(),
+        }
+
+        // A comment sibling next to the sole real (text) child must not change
+        // the flatten decision — the count that picks the single-child fast
+        // path must be over real children only, not raw XML nodes.
+        flatten_text_with_comment_sibling {
+            args: func_args![value: "<a>5<!-- note --></a>"],
+            want: Ok(value!({ "a": 5 })),
+            tdef: type_def(),
+        }
+
+        // Same as above, for a sole real (element) child.
+        flatten_element_with_comment_sibling {
+            args: func_args![value: "<a><!-- note --><b/></a>"],
+            want: Ok(value!({ "a": { "b": {} } })),
             tdef: type_def(),
         }
     ];

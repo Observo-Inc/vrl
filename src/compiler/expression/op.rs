@@ -4,7 +4,7 @@ use crate::compiler::state::{TypeInfo, TypeState};
 use crate::compiler::{
     expression::{self, Expr, Resolved},
     parser::{ast, Node},
-    value::VrlValueArithmetic,
+    value::{VrlValueArithmetic, MAX_REPEAT_BYTES},
     Context, Expression, TypeDef,
 };
 use crate::diagnostic::{DiagnosticMessage, Label, Note, Span, Urls};
@@ -279,20 +279,39 @@ impl Expression for Op {
 
                     // "bar" * 1
                     //
-                    // Deliberately stays infallible (OBE-10736). `try_mul` enforces a
-                    // MAX_REPEAT_BYTES cap and returns an error above it, but marking this
-                    // op fallible would be a breaking language change: every existing
-                    // program doing `"x" * n` would stop compiling with E100. Integer
-                    // `Add`/`Sub`/`Mul` make the same trade-off by wrapping rather than
-                    // erroring. The over-limit error still surfaces as a graceful runtime
-                    // error rather than an OOM, which is what the ticket required.
+                    // `try_mul` enforces a MAX_REPEAT_BYTES cap (OBE-10736) and returns
+                    // an error above it or on overflow. A literal repeat count is
+                    // author-controlled, not attacker data, so it stays infallible —
+                    // mirrors the `Div` arm above, which does the same
+                    // infallible-if-literal check for its own error case. A dynamic
+                    // count could come from untrusted event data, so that case is
+                    // fallible. A literal count whose magnitude alone already exceeds
+                    // MAX_REPEAT_BYTES is guaranteed to always fail (even a 1-byte
+                    // operand would overflow the cap), so it's fallible too — no
+                    // reason to hide a guaranteed error.
                     Mul if lhs_def.is_bytes() && rhs_def.is_integer() => {
-                        lhs_def.union(rhs_def).with_kind(K::bytes())
+                        let td = lhs_def.union(rhs_def).with_kind(K::bytes());
+                        match self.rhs.resolve_constant(&state) {
+                            Some(Value::Integer(n))
+                                if n.unsigned_abs() <= MAX_REPEAT_BYTES as u64 =>
+                            {
+                                td
+                            }
+                            _ => td.fallible(),
+                        }
                     }
 
-                    // 1 * "bar"  — see note above.
+                    // 1 * "bar" — see note above.
                     Mul if lhs_def.is_integer() && rhs_def.is_bytes() => {
-                        lhs_def.union(rhs_def).with_kind(K::bytes())
+                        let td = lhs_def.union(rhs_def).with_kind(K::bytes());
+                        match self.lhs.resolve_constant(&state) {
+                            Some(Value::Integer(n))
+                                if n.unsigned_abs() <= MAX_REPEAT_BYTES as u64 =>
+                            {
+                                td
+                            }
+                            _ => td.fallible(),
+                        }
                     }
 
                     // ... + ...
@@ -475,6 +494,8 @@ mod tests {
             want: TypeDef::boolean(),
         }
 
+        // A literal repeat count is author-controlled, not attacker data, so
+        // this stays infallible — mirrors `divide_integer_literal` above.
         multiply_string_integer {
             expr: |_| op(Mul, "foo", 1),
             want: TypeDef::bytes(),
@@ -483,6 +504,55 @@ mod tests {
         multiply_integer_string {
             expr: |_| op(Mul, 1, "foo"),
             want: TypeDef::bytes(),
+        }
+
+        // A dynamic (non-literal) repeat count could come from untrusted
+        // event data, so `try_mul`'s MAX_REPEAT_BYTES cap can genuinely
+        // trigger — must be fallible. Mirrors `divide_dynamic_rhs` above.
+        multiply_string_dynamic_integer {
+            expr: |state: &mut TypeState| {
+                state.local.insert_variable(Ident::new("foo"), crate::compiler::type_def::Details {
+                    type_def: TypeDef::integer(),
+                    value: None,
+                });
+
+                Op {
+                    lhs: Box::new(Literal::from("bar").into()),
+                    rhs: Box::new(Variable::new(Span::default(), Ident::new("foo"), &state.local).unwrap().into()),
+                    opcode: Mul,
+                }
+            },
+            want: TypeDef::bytes().fallible(),
+        }
+
+        multiply_dynamic_integer_string {
+            expr: |state: &mut TypeState| {
+                state.local.insert_variable(Ident::new("foo"), crate::compiler::type_def::Details {
+                    type_def: TypeDef::integer(),
+                    value: None,
+                });
+
+                Op {
+                    lhs: Box::new(Variable::new(Span::default(), Ident::new("foo"), &state.local).unwrap().into()),
+                    rhs: Box::new(Literal::from("bar").into()),
+                    opcode: Mul,
+                }
+            },
+            want: TypeDef::bytes().fallible(),
+        }
+
+        // A literal repeat count whose magnitude alone already exceeds
+        // MAX_REPEAT_BYTES is guaranteed to always fail (even a 1-byte
+        // operand would overflow the cap), so it's marked fallible despite
+        // being a literal — no reason to hide a guaranteed error.
+        multiply_string_huge_literal_integer {
+            expr: |_| op(Mul, "foo", (MAX_REPEAT_BYTES + 1) as i64),
+            want: TypeDef::bytes().fallible(),
+        }
+
+        multiply_huge_literal_integer_string {
+            expr: |_| op(Mul, (MAX_REPEAT_BYTES + 1) as i64, "foo"),
+            want: TypeDef::bytes().fallible(),
         }
 
         multiply_float_integer {

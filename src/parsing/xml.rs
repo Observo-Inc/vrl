@@ -164,42 +164,49 @@ fn process_node(node: Node, config: &ParseXmlConfig, depth: u32) -> Resolved {
                 (_, false) if config.include_attr => Ok(Value::Object(recurse(node)?)),
                 // If a text key should be used, always recurse.
                 (true, true) => Ok(Value::Object(recurse(node)?)),
-                // Otherwise, check the node count to determine what to do.
-                _ => match node.children().count() {
-                    // For a single node, 'flatten' the object if necessary.
-                    1 => {
-                        // Expect a single element.
-                        let node = node.children().next().expect("expected 1 XML node");
+                // Otherwise, check the (real) node count to determine what to do.
+                // Counting only element/text children — same filter `recurse`
+                // uses — keeps a comment/PI sibling from inflating the count
+                // and skipping the single-child flatten path below. Peeking two
+                // items (rather than collecting) avoids allocating for the
+                // common 0- or 2+-child cases, which fall straight through to
+                // `recurse` anyway.
+                _ => {
+                    let mut real_children =
+                        node.children().filter(|n| n.is_element() || n.is_text());
+                    match (real_children.next(), real_children.next()) {
+                        // Exactly one real child: 'flatten' the object if necessary.
+                        (Some(node), None) => {
+                            // If the node is an element, treat it as an object.
+                            if node.is_element() {
+                                let mut map = BTreeMap::new();
 
-                        // If the node is an element, treat it as an object.
-                        if node.is_element() {
-                            let mut map = BTreeMap::new();
+                                map.insert(
+                                    node.tag_name().name().to_string().into(),
+                                    process_node(node, config, depth + 1)?,
+                                );
 
-                            map.insert(
-                                node.tag_name().name().to_string().into(),
-                                process_node(node, config, depth + 1)?,
-                            );
-
-                            Value::Object(map)
-                        } else if node.is_text() {
-                            // 'Flatten' the object by continuing processing.
-                            process_node(node, config)
-                        } else {
-                            // Comment or PI as the sole child — return empty object
-                            // rather than forwarding into process_node where it would
-                            // hit an unreachable arm.
-                            Value::Object(BTreeMap::new())
+                                Ok(Value::Object(map))
+                            } else {
+                                // Only Text can reach here — the filter above
+                                // excludes Comment/PI.
+                                process_node(node, config, depth + 1)
+                            }
                         }
+                        // 0 or 2+ real children: expand (0 real children yields
+                        // an empty object, e.g. a comment/PI-only element).
+                        _ => Ok(Value::Object(recurse(node)?)),
                     }
-                    // For 2+ nodes, expand.
-                    _ => Ok(Value::Object(recurse(node)?)),
-                },
+                }
             }
         }
-        NodeType::Text => process_text(node.text().expect("expected XML text node"), config),
+        NodeType::Text => Ok(process_text(
+            node.text().expect("expected XML text node"),
+            config,
+        )),
         // Comment and PI nodes are skipped by the multi-child filter; reaching here
         // means a caller forwarded one directly. Return empty object rather than panic.
-        NodeType::Comment | NodeType::PI => Value::Object(BTreeMap::new()),
+        NodeType::Comment | NodeType::PI => Ok(Value::Object(BTreeMap::new())),
     }
 }
 

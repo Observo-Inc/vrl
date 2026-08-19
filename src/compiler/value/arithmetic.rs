@@ -13,7 +13,11 @@ use super::ValueError;
 
 /// Maximum byte length of a string produced by the `*` (repeat) operator.
 /// Prevents OOM when an attacker supplies a large integer multiplier (OBE-10736).
-const MAX_REPEAT_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
+///
+/// `pub(crate)` so `compiler::expression::op` can compare a literal multiplier
+/// against it at compile time (a literal count above this can never succeed,
+/// regardless of operand length, so it's always marked fallible).
+pub(crate) const MAX_REPEAT_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
 
 pub trait VrlValueArithmetic: Sized {
     /// Similar to [`std::ops::Mul`], but fallible (e.g. `TryMul`).
