@@ -18,6 +18,7 @@
 /// ## Caveats
 /// - **Closures**: Closure support is minimal. For now, we are only ensuring that there are no false positives.
 /// - **Variable Shadowing**: Variable shadowing is not supported. Unused variables will not be detected in this case.
+use super::compiler::STACK_RESERVE_FRACTION;
 use crate::compiler::codes::WARNING_UNUSED_CODE;
 use crate::compiler::parser::{Ident, Node};
 use crate::diagnostic::{Diagnostic, DiagnosticList, Label, Note, Severity};
@@ -32,12 +33,6 @@ use tracing::warn;
 
 const SIDE_EFFECT_FUNCTIONS: [&str; 5] =
     ["del", "log", "assert", "assert_eq", "set_semantic_meaning"];
-
-/// Fraction of the stack available when the walk starts that it will not descend into. Like the
-/// compiler's guard this is a fraction rather than a byte count: a fixed reserve lets a cheap
-/// per-level walk descend until only that fixed amount remains, which is then too little for
-/// whatever it calls at the bottom.
-const VISITOR_STACK_RESERVE_FRACTION: usize = 2;
 
 #[must_use]
 pub fn check_for_unused_results(ast: &Program) -> DiagnosticList {
@@ -56,7 +51,7 @@ struct IdentState {
     used_in_closure: bool,
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 struct VisitorState {
     level: usize,
     expecting_result: HashMap<usize, bool>,
@@ -68,6 +63,40 @@ struct VisitorState {
     /// Stack level below which `visit_node` stops descending. `None` where the platform cannot
     /// report remaining stack, in which case the walk behaves as it always has.
     stack_floor: Option<usize>,
+}
+
+// Hand-written rather than derived so that `stack_floor` is always computed from the actual
+// stack, not left `None` — a `None` here silently disables the guard in `visit_node`.
+impl Default for VisitorState {
+    fn default() -> Self {
+        let stack_floor = stacker::remaining_stack().map(|r| r / STACK_RESERVE_FRACTION);
+
+        let mut diagnostics = DiagnosticList::default();
+        if stack_floor.is_none() {
+            // Can't fail the check outright here — this walk is advisory only, so all we can do
+            // is tell the operator we can't tell how much stack is available on this platform.
+            diagnostics.push(Diagnostic {
+                severity: Severity::Warning,
+                code: WARNING_UNUSED_CODE,
+                message: "cannot determine remaining stack on this platform".to_owned(),
+                labels: vec![],
+                notes: vec![Note::Basic(
+                    "the unused-expression check may be abandoned partway through deeply nested programs"
+                        .to_owned(),
+                )],
+            });
+        }
+
+        Self {
+            level: 0,
+            expecting_result: HashMap::new(),
+            within_block_expression: HashMap::new(),
+            ident_to_state: BTreeMap::new(),
+            visiting_closure: false,
+            diagnostics,
+            stack_floor,
+        }
+    }
 }
 
 impl VisitorState {
@@ -207,6 +236,16 @@ impl AstVisitor<'_> {
         // unused-expression warnings for its deepest nodes costs nothing.
         if let (Some(remaining), Some(floor)) = (stacker::remaining_stack(), state.stack_floor) {
             if remaining < floor {
+                state.diagnostics.push(Diagnostic {
+                    severity: Severity::Warning,
+                    code: WARNING_UNUSED_CODE,
+                    message: format!("unused check abandoned, stack bottomed out at {floor} bytes"),
+                    labels: vec![Label::primary(
+                        "the unused-expression check did not descend past this point",
+                        node.span(),
+                    )],
+                    notes: vec![],
+                });
                 return;
             }
         }
@@ -433,10 +472,7 @@ impl AstVisitor<'_> {
     /// * Unused Expressions: an expression without side-effects with an unused result
     fn check_for_unused_results(&self) -> DiagnosticList {
         let mut unused_warnings = DiagnosticList::default();
-        let mut state = VisitorState {
-            stack_floor: stacker::remaining_stack().map(|r| r / VISITOR_STACK_RESERVE_FRACTION),
-            ..VisitorState::default()
-        };
+        let mut state = VisitorState::default();
         let root_expressions = &self.ast.0;
         for (i, root_node) in root_expressions.iter().enumerate() {
             let is_last = i == root_expressions.len() - 1;
