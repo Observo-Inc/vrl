@@ -3802,6 +3802,7 @@ dependencies = [
  "prost-reflect",
  "psl",
  "psl-types",
+ "psm",
  "publicsuffix",
  "quickcheck",
  "quoted_printable",
