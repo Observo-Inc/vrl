@@ -15,8 +15,8 @@
 
 use crate::parser::ast::Node;
 use crate::parser::ast::{
-    Abort, Assignment, Container, Expr, FunctionCall, FunctionClosure, IfStatement, Op, Predicate,
-    Query, QueryTarget, Return, Unary,
+    Abort, Assignment, Block, Container, Expr, FunctionCall, FunctionClosure, IfStatement, Op,
+    Predicate, Query, QueryTarget, Return, Unary,
 };
 
 /// Drops `root` and everything below it iteratively.
@@ -107,7 +107,7 @@ fn push_container(container: Container, worklist: &mut Vec<Expr>) {
     }
 }
 
-fn push_block(block: crate::parser::ast::Block, worklist: &mut Vec<Expr>) {
+fn push_block(block: Block, worklist: &mut Vec<Expr>) {
     worklist.extend(block.into_inner().into_iter().map(Node::into_inner));
 }
 

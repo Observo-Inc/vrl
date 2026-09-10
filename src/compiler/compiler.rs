@@ -84,7 +84,7 @@ pub(crate) enum CompilerError {
 /// Reserving half is what measurement supports: compilation costs ~5,030 bytes per nesting level in
 /// release and ~10,850 in debug (measured), and `type_info`'s walk back over the compiled subtree is a
 /// large enough share of that per-level cost that a quarter proved insufficient in debug builds.
-const STACK_RESERVE_FRACTION: usize = 2;
+pub(super) const STACK_RESERVE_FRACTION: usize = 2;
 
 /// A program nested deeply enough that compiling it would overflow the native stack.
 ///
@@ -102,6 +102,24 @@ impl DiagnosticMessage for StackExhaustionError {
     fn notes(&self) -> Vec<Note> {
         vec![Note::Basic(
             "reduce the nesting depth of this expression".to_owned(),
+        )]
+    }
+}
+
+/// The platform could not report how much native stack remains, so `compile_expr`'s guard has
+/// nothing to compare against and cannot bound its own recursion.
+#[derive(Debug, thiserror::Error)]
+#[error("cannot determine the remaining native stack on this platform, so compilation cannot be safely bounded")]
+pub(crate) struct UnknownStackBoundsError;
+
+impl DiagnosticMessage for UnknownStackBoundsError {
+    fn code(&self) -> usize {
+        671
+    }
+
+    fn notes(&self) -> Vec<Note> {
+        vec![Note::Basic(
+            "VRL cannot guarantee it is safe to compile on this platform/architecture".to_owned(),
         )]
     }
 }
@@ -129,6 +147,15 @@ impl<'a> Compiler<'a> {
         state: &TypeState,
         config: CompileConfig,
     ) -> Result<CompilationResult, DiagnosticList> {
+        // Without a remaining-stack reading, `compile_expr`'s guard has no floor to compare
+        // against and would silently let recursion run unbounded on this platform — fail loudly
+        // here instead, since that's a decision that will otherwise slip off everyone's mind.
+        let Some(remaining_stack) = stacker::remaining_stack() else {
+            return Err(DiagnosticList::from(
+                Box::new(UnknownStackBoundsError) as Box<dyn DiagnosticMessage>
+            ));
+        };
+
         let initial_state = state.clone();
         let mut state = state.clone();
 
@@ -141,7 +168,7 @@ impl<'a> Compiler<'a> {
             external_assignments: vec![],
             skip_missing_query_target: vec![],
             fallible_expression_error: None,
-            stack_floor: stacker::remaining_stack().map(|r| r / STACK_RESERVE_FRACTION),
+            stack_floor: Some(remaining_stack / STACK_RESERVE_FRACTION),
             config,
         };
         let expressions = compiler.compile_root_exprs(ast, &mut state);
@@ -198,10 +225,11 @@ impl<'a> Compiler<'a> {
         // crafted program can drive the native stack into its guard page — a SIGSEGV, not a
         // catchable panic. Stop while there is still stack to fail gracefully in.
         //
-        // `remaining_stack()` returns `None` where the platform cannot determine the bound; treat
-        // that as "proceed" so such platforms keep today's behaviour rather than rejecting
-        // everything. A program rejected here also never reaches `Expr::resolve`, whose recursion
-        // follows the same nesting (OBE-10740).
+        // `self.stack_floor` is always `Some` here — `Compiler::compile` already bailed out with
+        // a diagnostic if the platform couldn't report a bound. `remaining_stack()` is queried
+        // again per call rather than reusing that first reading, so this stays safe even if a
+        // platform's answer were to somehow change mid-compile. A program rejected here also
+        // never reaches `Expr::resolve`, whose recursion follows the same nesting (OBE-10740).
         if let (Some(remaining), Some(floor)) = (stacker::remaining_stack(), self.stack_floor) {
             if remaining < floor {
                 self.diagnostics.push(Box::new(StackExhaustionError));
@@ -915,17 +943,15 @@ impl<'a> Compiler<'a> {
 #[cfg(test)]
 mod tests {
     /// Compiles `!!!…!true` at `depth` on a thread with exactly `stack` bytes.
-    /// Returns `Ok(())` if it compiled, `Err(())` if it was rejected with a diagnostic.
+    /// Returns `Ok(())` if it compiled, `Err(diagnostics)` if it was rejected.
     /// A stack overflow aborts the process instead of returning — which is the point.
-    fn compile_at(depth: usize, stack: usize) -> Result<(), ()> {
+    fn compile_at(depth: usize, stack: usize) -> Result<(), crate::diagnostic::DiagnosticList> {
         let src = "!".repeat(depth) + "true";
         std::thread::Builder::new()
             .stack_size(stack)
             .spawn(move || {
                 let fns = crate::stdlib::all();
-                crate::compiler::compile(&src, &fns)
-                    .map(|_| ())
-                    .map_err(|_| ())
+                crate::compiler::compile(&src, &fns).map(|_| ())
             })
             .expect("spawn")
             .join()
@@ -934,11 +960,22 @@ mod tests {
 
     // OBE-10738: before the guard, this aborted the process — compilation costs ~5,030 bytes of
     // stack per nesting level, so 1,000 levels needs ~5 MB and a 2 MiB thread cannot hold it.
+    //
+    // If this test itself crashes with a SIGSEGV instead of failing an assertion, on any
+    // architecture, that's a sign `stacker` doesn't support the architecture — which means VRL
+    // may not be safe to run on that architecture.
     #[test]
     fn rejects_nesting_that_would_exhaust_the_stack() {
+        let diagnostics = compile_at(1_000, 2 * 1024 * 1024)
+            .expect_err("expected a diagnostic, not a compiled program");
         assert!(
-            compile_at(1_000, 2 * 1024 * 1024).is_err(),
-            "expected a diagnostic, not a compiled program"
+            diagnostics
+                .iter()
+                .any(|d| d.code == 670
+                    && d.notes()
+                        .iter()
+                        .any(|note| note.to_string().contains("reduce the nesting depth"))),
+            "expected a code-670 diagnostic noting to reduce the nesting depth, got {diagnostics:?}"
         );
     }
 
