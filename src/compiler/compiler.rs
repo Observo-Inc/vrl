@@ -57,8 +57,9 @@ pub struct Compiler<'a> {
     fallible_expression_error: Option<CompilerError>,
 
     /// Stack level below which `compile_expr` stops recursing, computed once from the stack
-    /// available when compilation started. `None` where the platform cannot report it.
-    stack_floor: Option<usize>,
+    /// available when compilation started. `Compiler::compile` already bails out with a
+    /// diagnostic if the platform can't report a bound, so this is always known by construction.
+    stack_floor: usize,
 
     config: CompileConfig,
 }
@@ -168,7 +169,7 @@ impl<'a> Compiler<'a> {
             external_assignments: vec![],
             skip_missing_query_target: vec![],
             fallible_expression_error: None,
-            stack_floor: Some(remaining_stack / STACK_RESERVE_FRACTION),
+            stack_floor: remaining_stack / STACK_RESERVE_FRACTION,
             config,
         };
         let expressions = compiler.compile_root_exprs(ast, &mut state);
@@ -225,13 +226,12 @@ impl<'a> Compiler<'a> {
         // crafted program can drive the native stack into its guard page — a SIGSEGV, not a
         // catchable panic. Stop while there is still stack to fail gracefully in.
         //
-        // `self.stack_floor` is always `Some` here — `Compiler::compile` already bailed out with
-        // a diagnostic if the platform couldn't report a bound. `remaining_stack()` is queried
-        // again per call rather than reusing that first reading, so this stays safe even if a
-        // platform's answer were to somehow change mid-compile. A program rejected here also
-        // never reaches `Expr::resolve`, whose recursion follows the same nesting (OBE-10740).
-        if let (Some(remaining), Some(floor)) = (stacker::remaining_stack(), self.stack_floor) {
-            if remaining < floor {
+        // `remaining_stack()` is queried again per call rather than reusing the reading taken in
+        // `Compiler::compile`, so this stays safe even if a platform's answer were to somehow
+        // change mid-compile. A program rejected here also never reaches `Expr::resolve`, whose
+        // recursion follows the same nesting (OBE-10740).
+        if let Some(remaining) = stacker::remaining_stack() {
+            if remaining < self.stack_floor {
                 self.diagnostics.push(Box::new(StackExhaustionError));
                 // We still own everything below this point. Dropping it normally would run the
                 // derived drop glue, which recurses per nesting level and would overflow the very
